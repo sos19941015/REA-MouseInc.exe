@@ -389,151 +389,15 @@ public:
         CloseClipboard();
     }
 
-    // OCR Engine 0: https://ocr.shuax.com (multipart/form-data)
-    static std::wstring perform_ocr_shuax(const std::string& png_bytes) {
-        std::string boundary = "----MouseIncBoundary7MA4YWxkTrZu0gW";
-        std::string body =
-            "--" + boundary + "\r\n"
-            "Content-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\n"
-            "Content-Type: image/png\r\n\r\n" +
-            png_bytes + "\r\n--" + boundary + "--\r\n";
-
-        HINTERNET hInet = InternetOpenA("MouseInc/2.13.4", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
-        if (!hInet) return L"";
-        HINTERNET hConn = InternetConnectA(hInet, "ocr.shuax.com", INTERNET_DEFAULT_HTTPS_PORT, nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
-        std::wstring result_text;
-        if (hConn) {
-            const char* acceptTypes[] = { "*/*", nullptr };
-            HINTERNET hReq = HttpOpenRequestA(hConn, "POST", "/", nullptr, nullptr, acceptTypes, INTERNET_FLAG_SECURE, 0);
-            if (hReq) {
-                std::string hdrs = "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
-                if (HttpSendRequestA(hReq, hdrs.c_str(), (DWORD)hdrs.size(), (LPVOID)body.data(), (DWORD)body.size())) {
-                    std::string resp;
-                    char buf[4096];
-                    DWORD read = 0;
-                    while (InternetReadFile(hReq, buf, sizeof(buf), &read) && read > 0) {
-                        resp.append(buf, read);
-                    }
-                    auto j = mini_json::parse(resp);
-                    if (j.is_object() && j["data"].is_string()) {
-                        result_text = utf8_to_wide(j["data"].get_string());
-                    }
-                }
-                InternetCloseHandle(hReq);
-            }
-            InternetCloseHandle(hConn);
-        }
-        InternetCloseHandle(hInet);
-        return result_text;
-    }
-
-    // OCR Engine 1: http://aidemo.youdao.com/ocrapi1
-    static std::wstring perform_ocr_youdao(const std::string& png_bytes) {
-        std::string b64 = base64_encode(png_bytes);
-        std::string body = "lang=auto&company=&imgBase=" + url_encode("data:image/png;base64," + b64);
-
-        HINTERNET hInet = InternetOpenA("MouseInc/2.13.4", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
-        if (!hInet) return L"";
-        HINTERNET hConn = InternetConnectA(hInet, "aidemo.youdao.com", INTERNET_DEFAULT_HTTP_PORT, nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
-        std::wstring result_text;
-        if (hConn) {
-            const char* acceptTypes[] = { "*/*", nullptr };
-            HINTERNET hReq = HttpOpenRequestA(hConn, "POST", "/ocrapi1", nullptr, "http://aidemo.youdao.com/ocrdemo", acceptTypes, 0, 0);
-            if (hReq) {
-                const char* hdrs = "Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r\n";
-                if (HttpSendRequestA(hReq, hdrs, (DWORD)strlen(hdrs), (LPVOID)body.data(), (DWORD)body.size())) {
-                    std::string resp;
-                    char buf[4096];
-                    DWORD read = 0;
-                    while (InternetReadFile(hReq, buf, sizeof(buf), &read) && read > 0) {
-                        resp.append(buf, read);
-                    }
-                    auto j = mini_json::parse(resp);
-                    if (j.is_object() && j["lines"].is_array()) {
-                        std::string joined;
-                        for (const auto& line : j["lines"].arr_val) {
-                            std::string w = line["words"].get_string();
-                            if (!w.empty()) {
-                                if (!joined.empty()) joined += "\r\n";
-                                joined += w;
-                            }
-                        }
-                        result_text = utf8_to_wide(joined);
-                    }
-                }
-                InternetCloseHandle(hReq);
-            }
-            InternetCloseHandle(hConn);
-        }
-        InternetCloseHandle(hInet);
-        return result_text;
-    }
-
-    // OCR Engine 2: https://www.paddlepaddle.org.cn/paddlehub-api/image_classification/chinese_ocr_db_crnn_mobile
-    static std::wstring perform_ocr_paddle(const std::string& png_bytes) {
-        std::string b64 = base64_encode(png_bytes);
-        std::string body = "{\"image\":\"" + b64 + "\"}";
-
-        HINTERNET hInet = InternetOpenA("MouseInc/2.13.4", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
-        if (!hInet) return L"";
-        HINTERNET hConn = InternetConnectA(hInet, "www.paddlepaddle.org.cn", INTERNET_DEFAULT_HTTPS_PORT, nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
-        std::wstring result_text;
-        if (hConn) {
-            const char* acceptTypes[] = { "*/*", nullptr };
-            HINTERNET hReq = HttpOpenRequestA(
-                hConn, "POST",
-                "/paddlehub-api/image_classification/chinese_ocr_db_crnn_mobile",
-                nullptr, nullptr, acceptTypes, INTERNET_FLAG_SECURE, 0);
-            if (hReq) {
-                const char* hdrs = "Content-Type: application/json;charset=utf-8\r\n";
-                if (HttpSendRequestA(hReq, hdrs, (DWORD)strlen(hdrs), (LPVOID)body.data(), (DWORD)body.size())) {
-                    std::string resp;
-                    char buf[4096];
-                    DWORD read = 0;
-                    while (InternetReadFile(hReq, buf, sizeof(buf), &read) && read > 0) {
-                        resp.append(buf, read);
-                    }
-                    auto j = mini_json::parse(resp);
-                    if (j.is_object() && j["result"].is_array() && j["result"].size() > 0) {
-                        const auto& data = j["result"].arr_val[0]["data"];
-                        if (data.is_array()) {
-                            std::string joined;
-                            for (const auto& item : data.arr_val) {
-                                std::string t = item["text"].get_string();
-                                if (!t.empty()) {
-                                    if (!joined.empty()) joined += "\r\n";
-                                    joined += t;
-                                }
-                            }
-                            result_text = utf8_to_wide(joined);
-                        }
-                    }
-                }
-                InternetCloseHandle(hReq);
-            }
-            InternetCloseHandle(hConn);
-        }
-        InternetCloseHandle(hInet);
-        return result_text;
-    }
-
     static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service) {
         std::wstring res;
-        if (ocr_service == 0) {
-            // 0: 微軟OCR (Windows.Media.Ocr.OcrEngine — 系統原生內建輕量離線 OCR)
-            res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
-        } else if (ocr_service == 3) {
-            // 3: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Windows App SDK NPU AI OCR)
+        if (ocr_service == 1 || ocr_service == 3) {
+            // 1: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Windows App SDK NPU AI OCR)
             res = win_ai_ocr::perform_ocr_microsoft_ai_ocr(png_bytes);
             if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
-        } else if (ocr_service == 1) {
-            // 1: 有道 OCR
-            res = perform_ocr_youdao(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         } else {
-            // 2: 飛槳 OCR
-            res = perform_ocr_paddle(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
+            // 0: 微軟OCR (Windows.Media.Ocr.OcrEngine — 系統原生內建輕量離線 OCR)
+            res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         }
         return res;
     }
