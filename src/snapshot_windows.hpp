@@ -520,17 +520,20 @@ public:
     static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service) {
         std::wstring res;
         if (ocr_service == 0) {
-            // OcrService 0 ("自有"): Microsoft Windows AI Text Recognition
-            // (Microsoft.Windows.AI.Imaging.TextRecognizer on NPU + Windows.Media.Ocr.OcrEngine offline)
-            res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
-            if (res.empty()) res = perform_ocr_youdao(png_bytes);
-            if (res.empty()) res = perform_ocr_paddle(png_bytes);
+            // 0: 微軟OCR (Windows.Media.Ocr.OcrEngine — 系統原生內建輕量離線 OCR)
+            res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
+        } else if (ocr_service == 3) {
+            // 3: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Windows App SDK NPU AI OCR)
+            res = win_ai_ocr::perform_ocr_microsoft_ai_ocr(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         } else if (ocr_service == 1) {
+            // 1: 有道 OCR
             res = perform_ocr_youdao(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         } else {
+            // 2: 飛槳 OCR
             res = perform_ocr_paddle(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         }
         return res;
     }

@@ -283,6 +283,7 @@ inline std::wstring run_windows_media_ocr_engine(
 
 struct OcrWorkerContext {
     const std::string* png_bytes = nullptr;
+    bool use_npu_ai = false;
     std::wstring result;
 };
 
@@ -292,10 +293,11 @@ inline unsigned __stdcall OcrMtaWorkerProc(void* arg) {
     try {
         auto bitmap = decode_png_to_software_bitmap(*ctx->png_bytes);
         if (bitmap) {
-            // 1. First try Microsoft.Windows.AI.Imaging.TextRecognizer (Windows App SDK AI on NPU)
-            ctx->result = try_microsoft_windows_ai_text_recognizer(bitmap);
-            // 2. If NPU TextRecognizer is unavailable or returned empty, use Windows.Media.Ocr.OcrEngine
-            if (ctx->result.empty()) {
+            if (ctx->use_npu_ai) {
+                // "微軟AI OCR" (OcrService == 3): Microsoft.Windows.AI.Imaging.TextRecognizer (NPU)
+                ctx->result = try_microsoft_windows_ai_text_recognizer(bitmap);
+            } else {
+                // "微軟OCR" (OcrService == 0): Windows.Media.Ocr.OcrEngine (Built-in lightweight Win10/11 OCR)
                 ctx->result = run_windows_media_ocr_engine(bitmap);
             }
         }
@@ -306,10 +308,25 @@ inline unsigned __stdcall OcrMtaWorkerProc(void* arg) {
     return 0;
 }
 
-inline std::wstring perform_ocr_windows_ai(const std::string& png_bytes) {
+// OcrService == 0: 微軟OCR (Windows.Media.Ocr.OcrEngine, 100% lightweight built-in Win10/11 OCR)
+inline std::wstring perform_ocr_microsoft_ocr(const std::string& png_bytes) {
     if (png_bytes.empty()) return L"";
     OcrWorkerContext ctx;
     ctx.png_bytes = &png_bytes;
+    ctx.use_npu_ai = false;
+    uintptr_t hThread = _beginthreadex(nullptr, 0, OcrMtaWorkerProc, &ctx, 0, nullptr);
+    if (!hThread) return L"";
+    WaitForSingleObject(reinterpret_cast<HANDLE>(hThread), 15000);
+    CloseHandle(reinterpret_cast<HANDLE>(hThread));
+    return ctx.result;
+}
+
+// OcrService == 3: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer, Copilot+ NPU OCR)
+inline std::wstring perform_ocr_microsoft_ai_ocr(const std::string& png_bytes) {
+    if (png_bytes.empty()) return L"";
+    OcrWorkerContext ctx;
+    ctx.png_bytes = &png_bytes;
+    ctx.use_npu_ai = true;
     uintptr_t hThread = _beginthreadex(nullptr, 0, OcrMtaWorkerProc, &ctx, 0, nullptr);
     if (!hThread) return L"";
     WaitForSingleObject(reinterpret_cast<HANDLE>(hThread), 15000);
