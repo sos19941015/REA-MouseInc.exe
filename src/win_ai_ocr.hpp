@@ -3,6 +3,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <appmodel.h>
+#include <shlwapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <roapi.h>
 #include <winstring.h>
 #include <process.h>
@@ -19,6 +23,7 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include "config.hpp"
 
 #pragma comment(lib, "windowsapp.lib")
 #pragma comment(lib, "runtimeobject.lib")
@@ -27,9 +32,260 @@ namespace mouseinc {
 namespace win_ai_ocr {
 
 // ============================================================================
-// Microsoft.Windows.AI.Imaging.TextRecognizer & Microsoft.Graphics.Imaging.ImageBuffer
-// WinRT ABI definitions matching:
-// https://learn.microsoft.com/zh-tw/windows/ai/apis/text-recognition
+// 1. Win11 OneOCR (Windows 11 SnippingTool oneocr.dll + oneocr.onemodel)
+//    Reference: https://github.com/b1tg/win11-oneocr
+// ============================================================================
+
+#pragma pack(push, 1)
+struct OneOcrImg {
+    int32_t t;        // 3 = BGRA (4 channels)
+    int32_t col;      // width in pixels
+    int32_t row;      // height in pixels
+    int32_t _unk;     // 0
+    int64_t step;     // row stride in bytes
+    int64_t data_ptr; // pointer to pixel data
+};
+#pragma pack(pop)
+
+using CreateOcrInitOptions_t = int64_t(__cdecl*)(int64_t*);
+using OcrInitOptionsSetUseModelDelayLoad_t = int64_t(__cdecl*)(int64_t, char);
+using CreateOcrPipeline_t = int64_t(__cdecl*)(const char*, const char*, int64_t, int64_t*);
+using CreateOcrProcessOptions_t = int64_t(__cdecl*)(int64_t*);
+using OcrProcessOptionsSetMaxRecognitionLineCount_t = int64_t(__cdecl*)(int64_t, int64_t);
+using RunOcrPipeline_t = int64_t(__cdecl*)(int64_t, OneOcrImg*, int64_t, int64_t*);
+using GetOcrLineCount_t = int64_t(__cdecl*)(int64_t, int64_t*);
+using GetOcrLine_t = int64_t(__cdecl*)(int64_t, int64_t, int64_t*);
+using GetOcrLineContent_t = int64_t(__cdecl*)(int64_t, int64_t*);
+
+inline bool has_oneocr_files(const std::wstring& dir) {
+    if (dir.empty()) return false;
+    std::wstring dll = dir + L"\\oneocr.dll";
+    std::wstring mdl = dir + L"\\oneocr.onemodel";
+    return PathFileExistsW(dll.c_str()) && PathFileExistsW(mdl.c_str());
+}
+
+// Automatically discover the installed Microsoft.ScreenSketch SnippingTool folder on any Windows 11 PC
+// regardless of package version (e.g. 11.2409.25.0, 11.2607.23.0, etc.)
+inline std::wstring find_oneocr_directory() {
+    // Tier 1: Check MouseInc application directory first (allows portable override)
+    std::wstring app_dir = AppConfig::get_app_dir();
+    if (has_oneocr_files(app_dir)) return app_dir;
+    if (has_oneocr_files(app_dir + L"\\SnippingTool")) return app_dir + L"\\SnippingTool";
+
+    // Tier 2: Win32 AppModel GetPackagesByPackageFamily("Microsoft.ScreenSketch_8wekyb3d8bbwe")
+    // Works for any non-admin user without needing directory-listing permissions on C:\Program Files\WindowsApps!
+    {
+        UINT32 count = 0;
+        UINT32 bufLen = 0;
+        const wchar_t* family = L"Microsoft.ScreenSketch_8wekyb3d8bbwe";
+        LONG rc = GetPackagesByPackageFamily(family, &count, nullptr, &bufLen, nullptr);
+        if (rc == ERROR_INSUFFICIENT_BUFFER && count > 0 && bufLen > 0) {
+            std::vector<PWSTR> names(count, nullptr);
+            std::vector<wchar_t> buffer(bufLen, 0);
+            if (GetPackagesByPackageFamily(family, &count, names.data(), &bufLen, buffer.data()) == ERROR_SUCCESS) {
+                for (UINT32 i = 0; i < count; i++) {
+                    if (!names[i]) continue;
+                    UINT32 pathLen = 0;
+                    if (GetPackagePathByFullName(names[i], &pathLen, nullptr) == ERROR_INSUFFICIENT_BUFFER && pathLen > 0) {
+                        std::vector<wchar_t> pathBuf(pathLen, 0);
+                        if (GetPackagePathByFullName(names[i], &pathLen, pathBuf.data()) == ERROR_SUCCESS) {
+                            std::wstring pkgRoot(pathBuf.data());
+                            if (has_oneocr_files(pkgRoot + L"\\SnippingTool")) return pkgRoot + L"\\SnippingTool";
+                            if (has_oneocr_files(pkgRoot)) return pkgRoot;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier 3: Check AppModel Repository Registry under HKCU
+    {
+        HKEY hPackages = nullptr;
+        const wchar_t* regPath = L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages";
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, regPath, 0, KEY_READ, &hPackages) == ERROR_SUCCESS) {
+            wchar_t subKeyName[256];
+            for (DWORD idx = 0; ; idx++) {
+                DWORD nameLen = 256;
+                if (RegEnumKeyExW(hPackages, idx, subKeyName, &nameLen, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+                    break;
+                }
+                if (wcsncmp(subKeyName, L"Microsoft.ScreenSketch_", 23) == 0) {
+                    wchar_t rootFolder[MAX_PATH] = {0};
+                    DWORD sz = sizeof(rootFolder);
+                    if (RegGetValueW(hPackages, subKeyName, L"PackageRootFolder", RRF_RT_REG_SZ, nullptr, rootFolder, &sz) == ERROR_SUCCESS && rootFolder[0]) {
+                        std::wstring pkgRoot(rootFolder);
+                        if (has_oneocr_files(pkgRoot + L"\\SnippingTool")) {
+                            RegCloseKey(hPackages);
+                            return pkgRoot + L"\\SnippingTool";
+                        }
+                        if (has_oneocr_files(pkgRoot)) {
+                            RegCloseKey(hPackages);
+                            return pkgRoot;
+                        }
+                    }
+                }
+            }
+            RegCloseKey(hPackages);
+        }
+    }
+
+    // Tier 4: Wildcard search in C:\Program Files\WindowsApps\Microsoft.ScreenSketch_*
+    {
+        WIN32_FIND_DATAW fd = {};
+        HANDLE hFind = FindFirstFileW(L"C:\\Program Files\\WindowsApps\\Microsoft.ScreenSketch_*", &fd);
+        std::wstring best_dir;
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    std::wstring base = std::wstring(L"C:\\Program Files\\WindowsApps\\") + fd.cFileName;
+                    if (has_oneocr_files(base + L"\\SnippingTool")) best_dir = base + L"\\SnippingTool";
+                    else if (has_oneocr_files(base)) best_dir = base;
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+        if (!best_dir.empty()) return best_dir;
+    }
+
+    return L"";
+}
+
+inline std::wstring perform_ocr_win11_oneocr(const std::string& png_bytes) {
+    if (png_bytes.empty()) return L"";
+
+    static HMODULE s_hOneOcr = nullptr;
+    static int64_t s_ctx = 0;
+    static int64_t s_pipeline = 0;
+    static int64_t s_opt = 0;
+    static RunOcrPipeline_t s_RunOcrPipeline = nullptr;
+    static GetOcrLineCount_t s_GetOcrLineCount = nullptr;
+    static GetOcrLine_t s_GetOcrLine = nullptr;
+    static GetOcrLineContent_t s_GetOcrLineContent = nullptr;
+
+    if (!s_pipeline) {
+        std::wstring dir = find_oneocr_directory();
+        if (dir.empty()) return L"";
+
+        SetDllDirectoryW(dir.c_str());
+        LoadLibraryW((dir + L"\\onnxruntime.dll").c_str());
+        s_hOneOcr = LoadLibraryW((dir + L"\\oneocr.dll").c_str());
+        if (!s_hOneOcr) return L"";
+
+        auto fnCreateOcrInitOptions = (CreateOcrInitOptions_t)GetProcAddress(s_hOneOcr, "CreateOcrInitOptions");
+        auto fnSetDelayLoad = (OcrInitOptionsSetUseModelDelayLoad_t)GetProcAddress(s_hOneOcr, "OcrInitOptionsSetUseModelDelayLoad");
+        auto fnCreatePipeline = (CreateOcrPipeline_t)GetProcAddress(s_hOneOcr, "CreateOcrPipeline");
+        auto fnCreateProcessOpts = (CreateOcrProcessOptions_t)GetProcAddress(s_hOneOcr, "CreateOcrProcessOptions");
+        auto fnSetMaxLines = (OcrProcessOptionsSetMaxRecognitionLineCount_t)GetProcAddress(s_hOneOcr, "OcrProcessOptionsSetMaxRecognitionLineCount");
+
+        s_RunOcrPipeline = (RunOcrPipeline_t)GetProcAddress(s_hOneOcr, "RunOcrPipeline");
+        s_GetOcrLineCount = (GetOcrLineCount_t)GetProcAddress(s_hOneOcr, "GetOcrLineCount");
+        s_GetOcrLine = (GetOcrLine_t)GetProcAddress(s_hOneOcr, "GetOcrLine");
+        s_GetOcrLineContent = (GetOcrLineContent_t)GetProcAddress(s_hOneOcr, "GetOcrLineContent");
+
+        if (!fnCreateOcrInitOptions || !fnSetDelayLoad || !fnCreatePipeline ||
+            !fnCreateProcessOpts || !fnSetMaxLines || !s_RunOcrPipeline ||
+            !s_GetOcrLineCount || !s_GetOcrLine || !s_GetOcrLineContent) {
+            return L"";
+        }
+
+        if (fnCreateOcrInitOptions(&s_ctx) != 0) return L"";
+        fnSetDelayLoad(s_ctx, 0);
+
+        const char* key = "kj)TGtrK>f]b[Piow.gU+nC@s\"\"\"\"\"\"4";
+        wchar_t prevCwd[MAX_PATH] = {0};
+        GetCurrentDirectoryW(MAX_PATH, prevCwd);
+        SetCurrentDirectoryW(dir.c_str());
+
+        int64_t res = fnCreatePipeline("oneocr.onemodel", key, s_ctx, &s_pipeline);
+        if (prevCwd[0]) SetCurrentDirectoryW(prevCwd);
+        if (res != 0 || !s_pipeline) {
+            s_pipeline = 0;
+            return L"";
+        }
+
+        if (fnCreateProcessOpts(&s_opt) != 0) {
+            s_pipeline = 0;
+            return L"";
+        }
+        fnSetMaxLines(s_opt, 1000);
+    }
+
+    // Decode PNG bytes to 32-bit BGRA bitmap buffer via GDI+ (no OpenCV needed!)
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, png_bytes.size());
+    if (!hMem) return L"";
+    void* pLock = GlobalLock(hMem);
+    if (pLock) {
+        memcpy(pLock, png_bytes.data(), png_bytes.size());
+        GlobalUnlock(hMem);
+    }
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &pStream))) {
+        GlobalFree(hMem);
+        return L"";
+    }
+
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(pStream);
+    pStream->Release();
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) {
+        delete bmp;
+        return L"";
+    }
+
+    int w = (int)bmp->GetWidth();
+    int h = (int)bmp->GetHeight();
+    if (w <= 0 || h <= 0) {
+        delete bmp;
+        return L"";
+    }
+
+    Gdiplus::Rect rect(0, 0, w, h);
+    Gdiplus::BitmapData bd = {};
+    if (bmp->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bd) != Gdiplus::Ok) {
+        delete bmp;
+        return L"";
+    }
+
+    OneOcrImg img = {};
+    img.t = 3;
+    img.col = w;
+    img.row = h;
+    img._unk = 0;
+    img.step = (int64_t)bd.Stride;
+    img.data_ptr = (int64_t)reinterpret_cast<uintptr_t>(bd.Scan0);
+
+    int64_t instance = 0;
+    std::wstring output;
+    if (s_RunOcrPipeline(s_pipeline, &img, s_opt, &instance) == 0 && instance != 0) {
+        int64_t line_count = 0;
+        if (s_GetOcrLineCount(instance, &line_count) == 0 && line_count > 0) {
+            std::string joined;
+            for (int64_t i = 0; i < line_count; i++) {
+                int64_t line = 0;
+                s_GetOcrLine(instance, i, &line);
+                if (!line) continue;
+                int64_t content_ptr = 0;
+                s_GetOcrLineContent(line, &content_ptr);
+                if (content_ptr) {
+                    const char* utf8_line = reinterpret_cast<const char*>((uintptr_t)content_ptr);
+                    if (utf8_line && utf8_line[0]) {
+                        if (!joined.empty()) joined += "\r\n";
+                        joined += utf8_line;
+                    }
+                }
+            }
+            output = utf8_to_wide(joined);
+        }
+    }
+
+    bmp->UnlockBits(&bd);
+    delete bmp;
+    return output;
+}
+
+// ============================================================================
+// 2. Microsoft.Windows.AI.Imaging.TextRecognizer & Windows.Media.Ocr.OcrEngine
+//    Reference: https://learn.microsoft.com/zh-tw/windows/ai/apis/text-recognition
 // ============================================================================
 
 enum class AIFeatureReadyState : int32_t {
@@ -45,7 +301,6 @@ enum class AIFeatureReadyResultState : int32_t {
     Failure = 2
 };
 
-// IInspectable-derived raw WinRT interfaces for dynamic activation on Copilot+ NPU systems
 struct __declspec(uuid("38595062-5201-5690-9A0A-70456E780E8E")) IAIFeatureReadyResult : ::IInspectable {
     virtual HRESULT __stdcall get_Error(::HRESULT* value) = 0;
     virtual HRESULT __stdcall get_ErrorDisplayText(HSTRING* value) = 0;
@@ -77,8 +332,6 @@ struct __declspec(uuid("3788C29B-4861-537F-B75A-5C5F3B7F2E3B")) ITextRecognizerS
     virtual HRESULT __stdcall CreateAsync(::IInspectable** operation) = 0;
 };
 
-// Decode PNG bytes in memory into a Windows::Graphics::Imaging::SoftwareBitmap
-// following the exact steps in https://learn.microsoft.com/zh-tw/windows/ai/apis/text-recognition
 inline winrt::Windows::Graphics::Imaging::SoftwareBitmap decode_png_to_software_bitmap(const std::string& png_bytes) {
     using namespace winrt::Windows::Storage::Streams;
     using namespace winrt::Windows::Graphics::Imaging;
@@ -104,8 +357,6 @@ inline winrt::Windows::Graphics::Imaging::SoftwareBitmap decode_png_to_software_
     return bitmap;
 }
 
-// Step A: Try Windows App SDK AI TextRecognizer (Microsoft.Windows.AI.Imaging.TextRecognizer)
-// Reference: https://learn.microsoft.com/zh-tw/windows/ai/apis/text-recognition
 inline std::wstring try_microsoft_windows_ai_text_recognizer(
     winrt::Windows::Graphics::Imaging::SoftwareBitmap const& bitmap) {
     try {
@@ -148,7 +399,6 @@ inline std::wstring try_microsoft_windows_ai_text_recognizer(
             }
         }
 
-        // ImageBuffer::CreateForSoftwareBitmap(bitmap)
         HSTRING hImgBufClass = nullptr;
         if (FAILED(WindowsCreateString(L"Microsoft.Graphics.Imaging.ImageBuffer", 38, &hImgBufClass))) {
             return L"";
@@ -168,7 +418,6 @@ inline std::wstring try_microsoft_windows_ai_text_recognizer(
             return L"";
         }
 
-        // TextRecognizer::CreateAsync().get()
         winrt::com_ptr<::IInspectable> createOpInsp;
         if (FAILED(recognizerStatics->CreateAsync(createOpInsp.put())) || !createOpInsp) {
             return L"";
@@ -180,7 +429,6 @@ inline std::wstring try_microsoft_windows_ai_text_recognizer(
         auto textRecognizer = recognizerInsp.try_as<ITextRecognizer>();
         if (!textRecognizer) return L"";
 
-        // RecognizeTextFromImage(imageBuffer)
         winrt::com_ptr<IRecognizedText> recognizedText;
         if (FAILED(textRecognizer->RecognizeTextFromImage(imageBuffer.get(), recognizedText.put())) || !recognizedText) {
             return L"";
@@ -217,8 +465,6 @@ inline std::wstring try_microsoft_windows_ai_text_recognizer(
     }
 }
 
-// Step B: Windows Platform SDK Windows.Media.Ocr.OcrEngine on the SoftwareBitmap
-// Built into all Windows 10 / 11 systems (works on both NPU and non-NPU PCs offline)
 inline std::wstring run_windows_media_ocr_engine(
     winrt::Windows::Graphics::Imaging::SoftwareBitmap const& bitmap) {
     using namespace winrt::Windows::Media::Ocr;
@@ -233,7 +479,6 @@ inline std::wstring run_windows_media_ocr_engine(
         bool first = true;
         for (auto const& line : result.Lines()) {
             std::wstring line_str(line.Text().c_str());
-            // Remove unwanted spaces between CJK characters that Windows.Media.Ocr sometimes inserts
             std::wstring cleaned;
             cleaned.reserve(line_str.size());
             for (size_t i = 0; i < line_str.size(); i++) {
@@ -255,14 +500,12 @@ inline std::wstring run_windows_media_ocr_engine(
         return ss.str();
     };
 
-    // 1. Try User Profile Languages first
     try {
         OcrEngine userEngine = OcrEngine::TryCreateFromUserProfileLanguages();
         std::wstring text = recognize_with_engine(userEngine);
         if (!text.empty()) return text;
     } catch (...) {}
 
-    // 2. Try Traditional Chinese, Simplified Chinese, English, Japanese in order
     const wchar_t* lang_tags[] = {
         L"zh-Hant-TW", L"zh-TW", L"zh-Hant",
         L"zh-Hans-CN", L"zh-CN", L"zh-Hans",
@@ -294,10 +537,8 @@ inline unsigned __stdcall OcrMtaWorkerProc(void* arg) {
         auto bitmap = decode_png_to_software_bitmap(*ctx->png_bytes);
         if (bitmap) {
             if (ctx->use_npu_ai) {
-                // "微軟AI OCR" (OcrService == 3): Microsoft.Windows.AI.Imaging.TextRecognizer (NPU)
                 ctx->result = try_microsoft_windows_ai_text_recognizer(bitmap);
             } else {
-                // "微軟OCR" (OcrService == 0): Windows.Media.Ocr.OcrEngine (Built-in lightweight Win10/11 OCR)
                 ctx->result = run_windows_media_ocr_engine(bitmap);
             }
         }
@@ -321,7 +562,7 @@ inline std::wstring perform_ocr_microsoft_ocr(const std::string& png_bytes) {
     return ctx.result;
 }
 
-// OcrService == 3: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer, Copilot+ NPU OCR)
+// OcrService == 1: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer, Copilot+ NPU OCR)
 inline std::wstring perform_ocr_microsoft_ai_ocr(const std::string& png_bytes) {
     if (png_bytes.empty()) return L"";
     OcrWorkerContext ctx;

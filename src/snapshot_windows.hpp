@@ -391,9 +391,14 @@ public:
 
     static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service) {
         std::wstring res;
-        if (ocr_service == 1 || ocr_service == 3) {
+        if (ocr_service == 2) {
+            // 2: Win11 OneOCR (Windows 11 SnippingTool oneocr.dll + oneocr.onemodel)
+            res = win_ai_ocr::perform_ocr_win11_oneocr(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
+        } else if (ocr_service == 1 || ocr_service == 3) {
             // 1: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Windows App SDK NPU AI OCR)
             res = win_ai_ocr::perform_ocr_microsoft_ai_ocr(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_win11_oneocr(png_bytes);
             if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         } else {
             // 0: 微軟OCR (Windows.Media.Ocr.OcrEngine — 系統原生內建輕量離線 OCR)
