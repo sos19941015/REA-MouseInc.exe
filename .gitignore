@@ -1,0 +1,8 @@
+# Build intermediates
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.metadata.json

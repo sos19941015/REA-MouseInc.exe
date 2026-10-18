@@ -1,0 +1,54 @@
+#include <windows.h>
+#include "resource.h"
+
+// Icon resource matching original name "ICON" and ID
+ICON ICON "MouseInc.ico"
+IDI_MAIN_ICON ICON "MouseInc.ico"
+
+// Custom named resources matching original MouseInc.exe PE resource layout
+DEFAULT JSON "DEFAULT.json"
+SHADOW PNG "SHADOW.png"
+
+KEY0 WAVE "KEY0.wav"
+KEY1 WAVE "KEY1.wav"
+KEY2 WAVE "KEY2.wav"
+KEY3 WAVE "KEY3.wav"
+KEY4 WAVE "KEY4.wav"
+VOLUME0 WAVE "VOLUME0.wav"
+VOLUME1 WAVE "VOLUME1.wav"
+
+// Manifest
+1 RT_MANIFEST "app.manifest"
+
+// Version Information
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 2,13,4,0
+ PRODUCTVERSION 2,13,4,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "shuax.com (Rebuilt with REA)"
+            VALUE "FileDescription", "MouseInc"
+            VALUE "FileVersion", "2.13.4"
+            VALUE "InternalName", "MouseInc.exe"
+            VALUE "LegalCopyright", "shuax.com"
+            VALUE "OriginalFilename", "MouseInc.exe"
+            VALUE "ProductName", "MouseInc"
+            VALUE "ProductVersion", "2.13.4"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
+
+
+SETTINGS            HTML                    "SETTINGS.html"
