@@ -14,6 +14,7 @@
 #include "config.hpp"
 #include "crypto_utils.hpp"
 #include "osd_overlay.hpp"
+#include "win_ai_ocr.hpp"
 
 namespace mouseinc {
 
@@ -519,15 +520,17 @@ public:
     static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service) {
         std::wstring res;
         if (ocr_service == 0) {
-            res = perform_ocr_shuax(png_bytes);
+            // OcrService 0 ("自有"): Microsoft Windows AI Text Recognition
+            // (Microsoft.Windows.AI.Imaging.TextRecognizer on NPU + Windows.Media.Ocr.OcrEngine offline)
+            res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
             if (res.empty()) res = perform_ocr_youdao(png_bytes);
             if (res.empty()) res = perform_ocr_paddle(png_bytes);
         } else if (ocr_service == 1) {
             res = perform_ocr_youdao(png_bytes);
-            if (res.empty()) res = perform_ocr_shuax(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
         } else {
             res = perform_ocr_paddle(png_bytes);
-            if (res.empty()) res = perform_ocr_youdao(png_bytes);
+            if (res.empty()) res = win_ai_ocr::perform_ocr_windows_ai(png_bytes);
         }
         return res;
     }
