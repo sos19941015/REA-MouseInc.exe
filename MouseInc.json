@@ -1014,7 +1014,7 @@
 		"TraceWidth": 3,
 		"WheelSwitch": true
 	},
-	"OcrService": 0,
+	"OcrService": 2,
 	"QuickJump": true,
 	"ShowIme": true,
 	"ShowTrayIcon": true,

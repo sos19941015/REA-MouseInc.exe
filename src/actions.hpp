@@ -456,12 +456,15 @@ inline void execute_action_command(
             if (hbm) {
                 std::string png = hbitmap_to_png_bytes(hbm);
                 DeleteObject(hbm);
-                std::wstring text = SnapshotManager::perform_ocr(png, cfg.ocr_service);
+                std::wstring err_msg;
+                std::wstring title = SnapshotManager::get_ocr_engine_title(cfg.ocr_service);
+                std::wstring text = SnapshotManager::perform_ocr(png, cfg.ocr_service, &err_msg);
                 if (!text.empty()) {
                     copy_text_to_clipboard(text);
-                    osd.show_banner(cfg.tr("SuccessTips", L"OCR result copied to clipboard"), cfg, 2200, false);
+                    osd.show_banner(cfg.tr("SuccessTips", L"OCR result copied to clipboard"), cfg, 2200, false, title);
                 } else {
-                    osd.show_banner(cfg.tr("FailedTips", L"OCR failed"), cfg, 2000, false);
+                    std::wstring fail = err_msg.empty() ? cfg.tr("FailedTips", L"OCR failed") : err_msg;
+                    osd.show_banner(fail, cfg, 2800, false, title);
                 }
             }
         }
@@ -752,12 +755,15 @@ inline void execute_action_command(
         } else if (mode == "ocr") {
             std::string png = hbitmap_to_png_bytes(hbm);
             DeleteObject(hbm);
-            std::wstring text = SnapshotManager::perform_ocr(png, cfg.ocr_service);
+            std::wstring err_msg;
+            std::wstring title = SnapshotManager::get_ocr_engine_title(cfg.ocr_service);
+            std::wstring text = SnapshotManager::perform_ocr(png, cfg.ocr_service, &err_msg);
             if (!text.empty()) {
                 copy_text_to_clipboard(text);
-                osd.show_banner(cfg.tr("SuccessTips", L"OCR result copied to clipboard"), cfg, 2200, false);
+                osd.show_banner(cfg.tr("SuccessTips", L"OCR result copied to clipboard"), cfg, 2200, false, title);
             } else {
-                osd.show_banner(cfg.tr("FailedTips", L"OCR failed"), cfg, 2000, false);
+                std::wstring fail = err_msg.empty() ? cfg.tr("FailedTips", L"OCR failed") : err_msg;
+                osd.show_banner(fail, cfg, 2800, false, title);
             }
         } else if (mode == "tofile") {
             save_hbitmap_dialog(hbm);

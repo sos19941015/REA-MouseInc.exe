@@ -389,22 +389,32 @@ public:
         CloseClipboard();
     }
 
-    static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service) {
-        std::wstring res;
+    static std::wstring get_ocr_engine_title(int ocr_service) {
+        if (ocr_service == 2) return L"MouseInc [Win11 OneOCR]";
+        if (ocr_service == 1) return L"MouseInc [微軟AI OCR]";
+        return L"MouseInc [微軟OCR]";
+    }
+
+    static std::wstring perform_ocr(const std::string& png_bytes, int ocr_service, std::wstring* out_error_msg = nullptr) {
+        if (out_error_msg) out_error_msg->clear();
         if (ocr_service == 2) {
             // 2: Win11 OneOCR (Windows 11 SnippingTool oneocr.dll + oneocr.onemodel)
-            res = win_ai_ocr::perform_ocr_win11_oneocr(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
-        } else if (ocr_service == 1 || ocr_service == 3) {
-            // 1: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Windows App SDK NPU AI OCR)
-            res = win_ai_ocr::perform_ocr_microsoft_ai_ocr(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_win11_oneocr(png_bytes);
-            if (res.empty()) res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
+            if (win_ai_ocr::ensure_loadable_oneocr_directory().empty()) {
+                if (out_error_msg) *out_error_msg = L"找不到 Win11 剪取工具 (OneOCR)";
+                return L"";
+            }
+            return win_ai_ocr::perform_ocr_win11_oneocr(png_bytes);
+        } else if (ocr_service == 1) {
+            // 1: 微軟AI OCR (Microsoft.Windows.AI.Imaging.TextRecognizer — Copilot+ PC NPU 專用)
+            if (!win_ai_ocr::is_microsoft_ai_ocr_supported()) {
+                if (out_error_msg) *out_error_msg = L"此電腦不支援微軟AI OCR (需 Copilot+ NPU)";
+                return L"";
+            }
+            return win_ai_ocr::perform_ocr_microsoft_ai_ocr(png_bytes);
         } else {
             // 0: 微軟OCR (Windows.Media.Ocr.OcrEngine — 系統原生內建輕量離線 OCR)
-            res = win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
+            return win_ai_ocr::perform_ocr_microsoft_ocr(png_bytes);
         }
-        return res;
     }
 
     static HBITMAP capture_screen_rect(RECT rc, bool draw_cursor = false) {

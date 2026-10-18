@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <appmodel.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #include <roapi.h>
@@ -66,14 +67,14 @@ inline bool has_oneocr_files(const std::wstring& dir) {
 
 // Automatically discover the installed Microsoft.ScreenSketch SnippingTool folder on any Windows 11 PC
 // regardless of package version (e.g. 11.2409.25.0, 11.2607.23.0, etc.)
-inline std::wstring find_oneocr_directory() {
+inline std::wstring find_oneocr_source_directory() {
     // Tier 1: Check MouseInc application directory first (allows portable override)
     std::wstring app_dir = AppConfig::get_app_dir();
     if (has_oneocr_files(app_dir)) return app_dir;
+    if (has_oneocr_files(app_dir + L"\\oneocr")) return app_dir + L"\\oneocr";
     if (has_oneocr_files(app_dir + L"\\SnippingTool")) return app_dir + L"\\SnippingTool";
 
     // Tier 2: Win32 AppModel GetPackagesByPackageFamily("Microsoft.ScreenSketch_8wekyb3d8bbwe")
-    // Works for any non-admin user without needing directory-listing permissions on C:\Program Files\WindowsApps!
     {
         UINT32 count = 0;
         UINT32 bufLen = 0;
@@ -151,6 +152,54 @@ inline std::wstring find_oneocr_directory() {
     return L"";
 }
 
+// WindowsApps folders have conditional ACLs (WIN://SYSAPPID) that allow reading/copying files
+// via CopyFileW, but block direct LoadLibraryW (ERROR_ACCESS_DENIED = 5) from non-packaged Win32 apps.
+// This helper automatically stages oneocr.dll, oneocr.onemodel, and onnxruntime.dll into %appdir%\oneocr
+// (or %TEMP%\MouseInc_OneOCR) so LoadLibraryW succeeds on every Windows 11 PC without manual copying.
+inline std::wstring ensure_loadable_oneocr_directory() {
+    std::wstring app_dir = AppConfig::get_app_dir();
+    if (has_oneocr_files(app_dir)) return app_dir;
+
+    std::wstring local_cache = app_dir + L"\\oneocr";
+    if (has_oneocr_files(local_cache)) return local_cache;
+
+    std::wstring src_dir = find_oneocr_source_directory();
+    if (src_dir.empty()) return L"";
+
+    // If src_dir is not inside WindowsApps, we can load from it directly
+    std::wstring lower_src = to_lower_wide(src_dir);
+    if (lower_src.find(L"windowsapps") == std::wstring::npos) {
+        return src_dir;
+    }
+
+    auto try_stage_to = [&](const std::wstring& dst_dir) -> bool {
+        CreateDirectoryW(dst_dir.c_str(), nullptr);
+        const wchar_t* files[] = { L"oneocr.dll", L"oneocr.onemodel", L"onnxruntime.dll" };
+        for (const wchar_t* f : files) {
+            std::wstring s = src_dir + L"\\" + f;
+            std::wstring d = dst_dir + L"\\" + f;
+            if (!PathFileExistsW(d.c_str()) && PathFileExistsW(s.c_str())) {
+                CopyFileW(s.c_str(), d.c_str(), FALSE);
+            }
+        }
+        return has_oneocr_files(dst_dir);
+    };
+
+    if (try_stage_to(local_cache)) {
+        return local_cache;
+    }
+
+    wchar_t temp_path[MAX_PATH] = {0};
+    if (GetTempPathW(MAX_PATH, temp_path) > 0) {
+        std::wstring temp_cache = std::wstring(temp_path) + L"MouseInc_OneOCR";
+        if (try_stage_to(temp_cache)) {
+            return temp_cache;
+        }
+    }
+
+    return src_dir;
+}
+
 inline std::wstring perform_ocr_win11_oneocr(const std::string& png_bytes) {
     if (png_bytes.empty()) return L"";
 
@@ -164,7 +213,7 @@ inline std::wstring perform_ocr_win11_oneocr(const std::string& png_bytes) {
     static GetOcrLineContent_t s_GetOcrLineContent = nullptr;
 
     if (!s_pipeline) {
-        std::wstring dir = find_oneocr_directory();
+        std::wstring dir = ensure_loadable_oneocr_directory();
         if (dir.empty()) return L"";
 
         SetDllDirectoryW(dir.c_str());
@@ -193,12 +242,15 @@ inline std::wstring perform_ocr_win11_oneocr(const std::string& png_bytes) {
         fnSetDelayLoad(s_ctx, 0);
 
         const char* key = "kj)TGtrK>f]b[Piow.gU+nC@s\"\"\"\"\"\"4";
-        wchar_t prevCwd[MAX_PATH] = {0};
-        GetCurrentDirectoryW(MAX_PATH, prevCwd);
-        SetCurrentDirectoryW(dir.c_str());
-
-        int64_t res = fnCreatePipeline("oneocr.onemodel", key, s_ctx, &s_pipeline);
-        if (prevCwd[0]) SetCurrentDirectoryW(prevCwd);
+        std::string model_path = wide_to_utf8(dir + L"\\oneocr.onemodel");
+        int64_t res = fnCreatePipeline(model_path.c_str(), key, s_ctx, &s_pipeline);
+        if (res != 0 || !s_pipeline) {
+            wchar_t prevCwd[MAX_PATH] = {0};
+            GetCurrentDirectoryW(MAX_PATH, prevCwd);
+            SetCurrentDirectoryW(dir.c_str());
+            res = fnCreatePipeline("oneocr.onemodel", key, s_ctx, &s_pipeline);
+            if (prevCwd[0]) SetCurrentDirectoryW(prevCwd);
+        }
         if (res != 0 || !s_pipeline) {
             s_pipeline = 0;
             return L"";
@@ -331,6 +383,22 @@ struct __declspec(uuid("3788C29B-4861-537F-B75A-5C5F3B7F2E3B")) ITextRecognizerS
     virtual HRESULT __stdcall EnsureReadyAsync(::IInspectable** operation) = 0;
     virtual HRESULT __stdcall CreateAsync(::IInspectable** operation) = 0;
 };
+
+inline bool is_microsoft_ai_ocr_supported() {
+    HSTRING hClassName = nullptr;
+    if (FAILED(WindowsCreateString(L"Microsoft.Windows.AI.Imaging.TextRecognizer", 43, &hClassName))) {
+        return false;
+    }
+    winrt::com_ptr<ITextRecognizerStatics> recognizerStatics;
+    HRESULT hr = RoGetActivationFactory(hClassName, __uuidof(ITextRecognizerStatics), recognizerStatics.put_void());
+    WindowsDeleteString(hClassName);
+    if (FAILED(hr) || !recognizerStatics) return false;
+
+    AIFeatureReadyState readyState = AIFeatureReadyState::NotSupportedOnCurrentSystem;
+    if (FAILED(recognizerStatics->GetReadyState(&readyState))) return false;
+    return readyState != AIFeatureReadyState::NotSupportedOnCurrentSystem &&
+           readyState != AIFeatureReadyState::DisabledByUser;
+}
 
 inline winrt::Windows::Graphics::Imaging::SoftwareBitmap decode_png_to_software_bitmap(const std::string& png_bytes) {
     using namespace winrt::Windows::Storage::Streams;
