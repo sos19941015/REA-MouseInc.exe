@@ -59,6 +59,7 @@ constexpr UINT WM_RENDER_TRACE = WM_APP + 107;
 constexpr UINT WM_UPDATE_CAPSLOCK = WM_APP + 108;
 
 constexpr UINT_PTR TIMER_CAPS_UNLOCK = 9101;
+constexpr UINT_PTR TIMER_CHECK_IME = 9102;
 
 enum TrayCmdId {
     ID_TRAY_PAUSE = 1001,
@@ -136,23 +137,25 @@ struct GlobalState {
 
 static GlobalState g_app;
 
-// Query current foreground window's IME open/conversion status via ImmGetDefaultIMEWnd (IMM32.dll)
-inline void query_and_show_ime_indicator(bool force_show) {
+// Query current foreground window's IME conversion status via ImmGetDefaultIMEWnd (matching original 0x00453946)
+inline void query_and_show_ime_indicator(bool silent_init) {
     if (!g_app.cfg.show_ime || g_app.paused) return;
     HWND hFg = GetForegroundWindow();
     if (!hFg) return;
     HWND hIme = ImmGetDefaultIMEWnd(hFg);
     if (!hIme) return;
 
-    DWORD_PTR openStatus = 0;
     DWORD_PTR convMode = 0;
-    if (!SendMessageTimeoutW(hIme, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0, SMTO_ABORTIFHUNG, 60, &openStatus)) {
+    if (!SendMessageTimeoutW(hIme, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0, SMTO_ABORTIFHUNG, 60, &convMode)) {
         return;
     }
-    SendMessageTimeoutW(hIme, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0, SMTO_ABORTIFHUNG, 60, &convMode);
 
-    int is_zh = (openStatus != 0 && (convMode & 0x0001) != 0) ? 1 : 0;
-    if (force_show || is_zh != g_app.last_ime_chinese) {
+    int is_zh = (convMode & 0x0001) ? 1 : 0;
+    if (silent_init || g_app.last_ime_chinese == -1) {
+        g_app.last_ime_chinese = is_zh;
+        return;
+    }
+    if (is_zh != g_app.last_ime_chinese) {
         g_app.last_ime_chinese = is_zh;
         g_app.osd.show_cursor_ime_tip(is_zh ? L"中" : L"英");
     }
@@ -699,12 +702,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 if (kb->vkCode == VK_CAPITAL) {
                     PostMessageW(g_app.main_hwnd, WM_UPDATE_CAPSLOCK, 0, 0);
                 }
-                // 5. ShowIme check when Shift / Space / Ctrl is released
-                if (g_app.cfg.show_ime &&
-                    (kb->vkCode == VK_SHIFT || kb->vkCode == VK_LSHIFT || kb->vkCode == VK_RSHIFT ||
-                     kb->vkCode == VK_SPACE || kb->vkCode == VK_CONTROL || kb->vkCode == VK_LCONTROL)) {
-                    PostMessageW(g_app.main_hwnd, WM_CHECK_IME_STATUS, 0, 0);
-                }
             }
         }
     }
@@ -829,6 +826,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     register_configured_hotkeys();
                     update_tray_icon();
                     g_app.osd.update_capslock_led((GetKeyState(VK_CAPITAL) & 0x0001) != 0, g_app.cfg.caps_lock_led);
+    query_and_show_ime_indicator(true);
+    SetTimer(g_app.main_hwnd, TIMER_CHECK_IME, 100, nullptr);
                     g_app.osd.show_banner(g_app.cfg.tr("ReloadSucess", L"Configuration reloaded"), g_app.cfg, 2500, false);
                     break;
                 case ID_TRAY_AUTORUN:
@@ -908,6 +907,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     PostMessageW(hwnd, WM_UPDATE_CAPSLOCK, 0, 0);
                 }
                 return 0;
+            } else if (wParam == TIMER_CHECK_IME) {
+                query_and_show_ime_indicator(false);
+                return 0;
             }
             break;
 
@@ -931,6 +933,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             register_configured_hotkeys();
             update_tray_icon();
             g_app.osd.update_capslock_led((GetKeyState(VK_CAPITAL) & 0x0001) != 0, g_app.cfg.caps_lock_led);
+    query_and_show_ime_indicator(true);
+    SetTimer(g_app.main_hwnd, TIMER_CHECK_IME, 100, nullptr);
             g_app.osd.show_banner(g_app.cfg.tr("ReloadSucess", L"Configuration reloaded"), g_app.cfg, 2500, false);
             return 0;
 
@@ -1019,6 +1023,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_app.rt.settings_port = g_app.settings_srv.get_port();
 
     g_app.osd.update_capslock_led((GetKeyState(VK_CAPITAL) & 0x0001) != 0, g_app.cfg.caps_lock_led);
+    query_and_show_ime_indicator(true);
+    SetTimer(g_app.main_hwnd, TIMER_CHECK_IME, 100, nullptr);
 
     g_app.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, hInstance, 0);
     g_app.kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
