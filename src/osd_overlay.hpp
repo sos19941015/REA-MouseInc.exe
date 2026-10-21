@@ -89,10 +89,34 @@ class OsdOverlayManager {
     }
 
     static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        if (msg == WM_TIMER && (wParam == 9001 || wParam == 9002 || wParam == 9003)) {
-            KillTimer(hwnd, wParam);
-            ShowWindow(hwnd, SW_HIDE);
-            return 0;
+        if (msg == WM_TIMER) {
+            if (wParam == 9001 || wParam == 9002 || wParam == 9003) {
+                KillTimer(hwnd, wParam);
+                if (wParam == 9002) KillTimer(hwnd, 9010);
+                if (wParam == 9003) KillTimer(hwnd, 9011);
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            } else if (wParam == 9010) {
+                if (!IsWindowVisible(hwnd)) {
+                    KillTimer(hwnd, 9010);
+                    return 0;
+                }
+                POINT pt;
+                GetCursorPos(&pt);
+                SetWindowPos(hwnd, HWND_TOPMOST, pt.x + 16, pt.y + 16, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                return 0;
+            } else if (wParam == 9011) {
+                if (!IsWindowVisible(hwnd)) {
+                    KillTimer(hwnd, 9011);
+                    return 0;
+                }
+                POINT pt;
+                GetCursorPos(&pt);
+                HWND hIme = FindWindowW(L"MouseIncOverlayWnd", L"MouseIncImeTip");
+                int offsetY = (hIme && IsWindowVisible(hIme)) ? 54 : 16;
+                SetWindowPos(hwnd, HWND_TOPMOST, pt.x + 16, pt.y + offsetY, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                return 0;
+            }
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -402,18 +426,22 @@ public:
         ReleaseDC(nullptr, hdcScreen);
     }
 
-    // Top-right corner CapsLock LED indicator ("在螢幕右上角顯示大寫鎖定狀態")
-    void update_capslock_led(bool caps_on, bool enabled) {
+    // Cursor-following CapsLock indicator ("大小寫顯示跟隨游標")
+    void update_capslock_led(bool caps_on, bool enabled, bool show_off_tip = false) {
         if (!hwnd_caps_) return;
-        if (!enabled || !caps_on) {
+        if (!enabled || (!caps_on && !show_off_tip)) {
+            KillTimer(hwnd_caps_, 9003);
+            KillTimer(hwnd_caps_, 9011);
             if (IsWindowVisible(hwnd_caps_)) {
                 ShowWindow(hwnd_caps_, SW_HIDE);
             }
             return;
         }
 
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int wndW = 116, wndH = 34;
+        POINT pt;
+        GetCursorPos(&pt);
+        int wndW = caps_on ? 96 : 64;
+        int wndH = 34;
         HDC hdcScreen = GetDC(nullptr);
         HDC hdcMem = CreateCompatibleDC(hdcScreen);
 
@@ -435,32 +463,43 @@ public:
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
             Gdiplus::RectF pill(1.0f, 1.0f, (Gdiplus::REAL)(wndW - 2), (Gdiplus::REAL)(wndH - 2));
-            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(215, 32, 32, 32));
+            Gdiplus::SolidBrush bgBrush(caps_on ? Gdiplus::Color(220, 32, 32, 32) : Gdiplus::Color(220, 228, 117, 66));
             Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 82, 196, 26));
             Gdiplus::SolidBrush fgBrush(Gdiplus::Color(255, 255, 255, 255));
             auto* path = create_round_rect(pill, 8.0f);
             g.FillPath(&bgBrush, path);
             delete path;
 
-            g.FillEllipse(&dotBrush, 12.0f, 11.0f, 12.0f, 12.0f);
-
             Gdiplus::FontFamily fontFamily(L"Microsoft YaHei UI");
-            Gdiplus::Font font(&fontFamily, 14.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font font(&fontFamily, 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
             Gdiplus::StringFormat fmt;
             fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
             fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::RectF textRect(24.0f, 1.0f, (Gdiplus::REAL)(wndW - 28), (Gdiplus::REAL)(wndH - 2));
-            g.DrawString(L"CAPS LOCK", -1, &font, textRect, &fmt, &fgBrush);
+
+            if (caps_on) {
+                g.FillEllipse(&dotBrush, 11.0f, 11.0f, 12.0f, 12.0f);
+                Gdiplus::RectF textRect(22.0f, 1.0f, (Gdiplus::REAL)(wndW - 26), (Gdiplus::REAL)(wndH - 2));
+                g.DrawString(L"A 大寫", -1, &font, textRect, &fmt, &fgBrush);
+            } else {
+                g.DrawString(L"a 小寫", -1, &font, pill, &fmt, &fgBrush);
+            }
         }
 
+        int offsetY = (hwnd_ime_ && IsWindowVisible(hwnd_ime_)) ? 54 : 16;
         POINT ptSrc = { 0, 0 };
-        POINT ptDst = { sw - wndW - 18, 18 };
+        POINT ptDst = { pt.x + 16, pt.y + offsetY };
         SIZE szWnd = { wndW, wndH };
         BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
         UpdateLayeredWindow(hwnd_caps_, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
         if (!IsWindowVisible(hwnd_caps_)) {
             ShowWindow(hwnd_caps_, SW_SHOWNOACTIVATE);
+        }
+        SetTimer(hwnd_caps_, 9011, 16, nullptr);
+        if (caps_on) {
+            KillTimer(hwnd_caps_, 9003);
+        } else {
+            SetTimer(hwnd_caps_, 9003, 950, nullptr);
         }
 
         SelectObject(hdcMem, hbmOld);
@@ -518,6 +557,7 @@ public:
 
         UpdateLayeredWindow(hwnd_ime_, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
         ShowWindow(hwnd_ime_, SW_SHOWNOACTIVATE);
+        SetTimer(hwnd_ime_, 9010, 16, nullptr);
         SetTimer(hwnd_ime_, 9002, 950, nullptr);
 
         SelectObject(hdcMem, hbmOld);

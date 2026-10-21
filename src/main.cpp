@@ -124,8 +124,9 @@ struct GlobalState {
     // Double Ctrl+C clipboard menu state
     DWORD last_ctrl_c_tick = 0;
 
-    // ShowIme state
+    // ShowIme & CapsLock state
     int last_ime_chinese = -1;
+    int last_capslock_on = -1;
 
     // QuickJump state
     HWND last_quickjump_dlg = nullptr;
@@ -137,9 +138,25 @@ struct GlobalState {
 
 static GlobalState g_app;
 
-// Query current foreground window's IME conversion status via ImmGetDefaultIMEWnd (matching original 0x00453946)
+// Query current foreground window's IME conversion status & CapsLock state on 100ms timer (matching original 0x004532C1 & 0x00453946)
 inline void query_and_show_ime_indicator(bool silent_init) {
-    if (!g_app.cfg.show_ime || g_app.paused) return;
+    if (g_app.paused) return;
+
+    int caps_on = (GetKeyState(VK_CAPITAL) & 0x0001) ? 1 : 0;
+    if (silent_init || g_app.last_capslock_on == -1) {
+        g_app.last_capslock_on = caps_on;
+        g_app.osd.update_capslock_led(caps_on != 0, g_app.cfg.caps_lock_led, false);
+    } else if (caps_on != g_app.last_capslock_on) {
+        g_app.last_capslock_on = caps_on;
+        g_app.osd.update_capslock_led(caps_on != 0, g_app.cfg.caps_lock_led, true);
+        if (caps_on && g_app.cfg.caps_unlock && g_app.main_hwnd) {
+            SetTimer(g_app.main_hwnd, TIMER_CAPS_UNLOCK, 30000, nullptr);
+        } else if (!caps_on && g_app.main_hwnd) {
+            KillTimer(g_app.main_hwnd, TIMER_CAPS_UNLOCK);
+        }
+    }
+
+    if (!g_app.cfg.show_ime) return;
     HWND hFg = GetForegroundWindow();
     if (!hFg) return;
     HWND hIme = ImmGetDefaultIMEWnd(hFg);
@@ -883,13 +900,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
 
         case WM_UPDATE_CAPSLOCK: {
-            bool caps_on = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-            g_app.osd.update_capslock_led(caps_on, g_app.cfg.caps_lock_led);
-            if (caps_on && g_app.cfg.caps_unlock) {
-                SetTimer(hwnd, TIMER_CAPS_UNLOCK, 30000, nullptr);
-            } else {
-                KillTimer(hwnd, TIMER_CAPS_UNLOCK);
-            }
+            query_and_show_ime_indicator(false);
             return 0;
         }
 
